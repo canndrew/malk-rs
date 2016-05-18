@@ -1,0 +1,10 @@
+[package]
+name = "malkc"
+version = "0.1.0"
+authors = ["Andrew Cann <shum@canndrew.org>"]
+
+[dependencies]
+quick-error = "*"
+log = "*"
+env_logger = "*"
+
