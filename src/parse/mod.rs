@@ -2,6 +2,7 @@ pub use self::ident::{Ident, parse_ident, pprint_ident};
 pub use self::struct_type::{StructType, pprint_struct_type};
 pub use self::enum_type::{EnumType, pprint_enum_type};
 pub use self::struct_term::{StructTerm, parse_struct_term_inner, pprint_struct_term};
+pub use self::enum_term::{EnumTerm, EnumTermKind, parse_enum_term_inner, pprint_enum_term};
 pub use self::composite_type::parse_composite_type_inner;
 pub use self::composite_type_elem::{CompositeTypeElem, parse_maybe_composite_type_elem,
                                  parse_composite_type_elem, pprint_composite_type_elem};
@@ -16,6 +17,7 @@ mod composite_type_elem;
 mod composite_type;
 mod struct_type;
 mod enum_type;
+mod enum_term;
 mod expr;
 
 quick_error! {
@@ -29,6 +31,9 @@ quick_error! {
         }
         ExpectedIdent {
             description("Expected ident")
+        }
+        ExpectedEnumContents {
+            description("Expected enum contents")
         }
     }
 }

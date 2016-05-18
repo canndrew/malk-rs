@@ -3,13 +3,15 @@ use std::fmt;
 use lexer::{Span, Token, TokenKind};
 use parse::{ParseError, StructTerm, parse_struct_term_inner, pprint_struct_term,
                         StructType, parse_composite_type_inner, pprint_struct_type,
-                        EnumType, pprint_enum_type};
+                        EnumType, pprint_enum_type,
+                        EnumTerm, parse_enum_term_inner, pprint_enum_term};
 
 pub enum ExprKind {
     Parens(Box<Expr>),
     StructTerm(Box<StructTerm>),
     StructType(Box<StructType>),
     EnumType(Box<EnumType>),
+    EnumTerm(Box<EnumTerm>),
 }
 
 pub struct Expr {
@@ -39,6 +41,19 @@ pub fn parse_expr(tokens: &[Token]) -> Result<Expr, ParseError> {
                         span: t.span,
                     };
                     let kind = ExprKind::StructTerm(Box::new(struct_term));
+                    let expr = Expr {
+                        kind: kind,
+                        span: t.span,
+                    };
+                    Ok(expr)
+                },
+                TokenKind::SquareBraces(ref sub_tokens) => {
+                    let enum_term_kind = try!(parse_enum_term_inner(&sub_tokens[..]));
+                    let enum_term = EnumTerm {
+                        kind: enum_term_kind,
+                        span: t.span,
+                    };
+                    let kind = ExprKind::EnumTerm(Box::new(enum_term));
                     let expr = Expr {
                         kind: kind,
                         span: t.span,
@@ -108,6 +123,9 @@ pub fn pprint_expr(expr: &Expr, f: &mut fmt::Formatter) -> fmt::Result {
         },
         ExprKind::EnumType(ref enum_type) => {
             pprint_enum_type(enum_type, f)
+        },
+        ExprKind::EnumTerm(ref enum_term) => {
+            pprint_enum_term(enum_term, f)
         },
     }
 }
