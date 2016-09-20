@@ -3,6 +3,7 @@ use std::fmt;
 use lexer::{Span, Token, TokenKind};
 use parse::ParseError;
 
+#[derive(Clone)]
 pub struct Ident {
     pub text: String,
     pub span: Span,

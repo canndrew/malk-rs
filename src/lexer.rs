@@ -33,6 +33,9 @@ pub enum TokenKind {
     Colon,
     Semicolon,
     Hash,
+    Minus,
+    GreaterThan,
+    At,
 }
 
 impl TextPos {
@@ -295,6 +298,18 @@ fn sub_lex(start: TextPos, src: &str) -> Result<SubLex, LexError> {
             }
             if c == ':' {
                 lex_symbol(TokenKind::Colon);
+                continue;
+            }
+            if c == '-' {
+                lex_symbol(TokenKind::Minus);
+                continue;
+            }
+            if c == '>' {
+                lex_symbol(TokenKind::GreaterThan);
+                continue;
+            }
+            if c == '@' {
+                lex_symbol(TokenKind::At);
                 continue;
             }
         }

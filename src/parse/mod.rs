@@ -9,6 +9,9 @@ pub use self::composite_type_elem::{CompositeTypeElem, parse_maybe_composite_typ
 pub use self::composite_term_elem::{CompositeTermElem, parse_maybe_composite_term_elem,
                                     parse_composite_term_elem, pprint_composite_term_elem};
 pub use self::expr::{Expr, ExprKind, parse_expr, pprint_expr};
+pub use self::func_term::{FuncTerm, pprint_func_term};
+pub use self::pattern::{Pattern, PatternKind, BindPattern, pprint_pattern,
+                        reparse_pattern_from_expr};
 
 mod ident;
 mod composite_term_elem;
@@ -18,6 +21,8 @@ mod composite_type;
 mod struct_type;
 mod enum_type;
 mod enum_term;
+mod func_term;
+mod pattern;
 mod expr;
 
 quick_error! {
@@ -34,6 +39,12 @@ quick_error! {
         }
         ExpectedEnumContents {
             description("Expected enum contents")
+        }
+        InvalidVariableBind {
+            description("Invalid variable bind")
+        }
+        InvalidPattern {
+            description("Invalid pattern")
         }
     }
 }
