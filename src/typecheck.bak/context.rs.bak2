@@ -1,0 +1,100 @@
+use std::fmt;
+use core::{Term, World, bump_index, normalise, substitute};
+use parse::Ident;
+
+pub struct VarDef<'p> {
+    pub var_name: &'p Ident,
+    pub var_type: Term,
+}
+
+#[derive(Clone, Copy)]
+pub enum Ctx<'c, 'p: 'c> {
+    Empty,
+    Cons(&'c CtxNode<'c, 'p>),
+}
+
+pub struct CtxNode<'c, 'p: 'c> {
+    pub tail: Ctx<'c, 'p>,
+    pub vars: Vec<VarDef<'p>>,
+    pub arg: Term,
+    pub transform: Box<Fn(usize, Term, Term) -> Term>,
+}
+
+impl<'c, 'p> Ctx<'c, 'p> {
+    pub fn lookup_by_name(&self, name: &str) -> Option<(usize, Term)> {
+        if let Some((index, var_type)) = self.lookup_by_name_with_index(name, 0) {
+            let var_type = bump_index(var_type, index + 1, 0);
+            return Some((index, var_type));
+        }
+        None
+    }
+
+    fn lookup_by_name_with_index(&self, name: &str, index: usize) -> Option<(usize, &Term)> {
+        match *self {
+            Ctx::Empty => None,
+            Ctx::Cons(ctx_node) => {
+                ctx_node.lookup_by_name_with_index(name, index)
+            },
+        }
+    }
+}
+
+impl<'c, 'p> CtxNode<'c, 'p> {
+    fn lookup_by_name_with_index(&self, name: &str, mut index: usize) -> Option<(usize, &Term)> {
+        for var_def in self.vars.iter().rev() {
+            if &var_def.var_name.text[..] == name {
+                return Some((index, &var_def.var_type));
+            }
+            index += 1;
+        }
+        self.tail.lookup_by_name_with_index(name, index)
+    }
+
+    pub fn skew(&self, term: &Term, world: &World) -> Term {
+        //println!("skew. arg == {:#?}", self.arg);
+        let t = bump_index(term, self.vars.len(), 1);
+        let t = substitute(&t, &self.arg, 0);
+        //println!("skew. substituted == {:#?}", t);
+        normalise(&t, world)
+    }
+
+    pub fn deskew(&self, term: Term, res_type: Term, world: &World) -> Term {
+        let t = (self.transform)(0, term, res_type);
+        normalise(&t, world)
+    }
+}
+
+impl<'p> fmt::Display for VarDef<'p> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {:?}", self.var_name, self.var_type)
+    }
+}
+
+impl<'c, 'p> fmt::Display for CtxNode<'c, 'p> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for var in &self.vars {
+            write!(f, "{},", var)?;
+        }
+        write!(f, "({:?})", self.arg)
+    }
+}
+
+impl<'c, 'p> fmt::Display for Ctx<'c, 'p> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut ctx = self;
+        loop {
+            match *ctx {
+                Ctx::Empty => {
+                    write!(f, "·")?;
+                    break;
+                },
+                Ctx::Cons(ctx_node) => {
+                    write!(f, "{} ꞊", ctx_node)?;
+                    ctx = &ctx_node.tail;
+                },
+            }
+        }
+        Ok(())
+    }
+}
+

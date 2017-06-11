@@ -1,0 +1,16 @@
+# Int types in malk:
+
+We definitely want types like U32, I64 etc.
+However, we also want to make it easy to protect ourselves from overflows.
+idea:
+    U32 is just syntactic sugar for a specific instance of a more general type family of ranges of ints.
+    Int { low: Ibig, high: Ibig }
+    U32 = Int { low = 0, high = 2**32 }
+    
+    The unadorned +/-/* operations never overflow - they just expand the return type to include the full range.
+    then there's other operations:
+        (a: U32) +@ (b: U32)  => U32                                // wrapping add
+        (a: U32) +| (b: U32)  => U32                                // saturating add
+        (a: U32) +? (b: U32)  => #[U32, .. a + b > 2 ** 32]         // checked add
+        (a: U32) +! (b: U32)  => U32 eff Except(a + b > 2 ** 32)    // checked add
+

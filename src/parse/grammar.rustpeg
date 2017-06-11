@@ -1,0 +1,822 @@
+use std::rc::Rc;
+use std::str::FromStr;
+use num::BigUint;
+use super::expr::*;
+
+pub doc -> Expr<BlockPrecedenceExprKind>
+    = ws* e:block_precedence_expr ws*
+    {
+        e
+    }
+
+expr<kind>
+    = ek:kind
+    {
+        Expr {
+            kind: ek,
+            term: None,
+            ctx: None,
+        }
+    }
+
+block_precedence_expr -> Expr<BlockPrecedenceExprKind>
+    = ek:block_precedence_expr_kind
+    {
+        Expr {
+            kind: ek,
+            term: None,
+            ctx: None,
+        }
+    }
+
+operator_precedence_expr -> Expr<OperatorPrecedenceExprKind>
+    = ek:operator_precedence_expr_kind
+    {
+        Expr {
+            kind: ek,
+            term: None,
+            ctx: None,
+        }
+    }
+
+app_precedence_expr -> Expr<AppPrecedenceExprKind>
+    = ek:app_precedence_expr_kind
+    {
+        Expr {
+            kind: ek,
+            term: None,
+            ctx: None,
+        }
+    }
+
+enclosed_precedence_expr -> Expr<EnclosedPrecedenceExprKind>
+    = ek:enclosed_precedence_expr_kind
+    {
+        Expr {
+            kind: ek,
+            term: None,
+            ctx: None,
+        }
+    }
+
+block_precedence_expr_kind -> BlockPrecedenceExprKind
+    = let_expr_kind
+    / upcast_operator_precedence_expr_kind
+
+operator_precedence_expr_kind -> OperatorPrecedenceExprKind
+    = singular_func_term_expr_kind
+    / singular_func_type_expr_kind
+    / equality_term_expr_kind
+    / equality_type_expr_kind
+    / typed_expr_kind
+    / rec_type_expr_kind
+    / upcast_app_precedence_expr_kind
+
+app_precedence_expr_kind -> AppPrecedenceExprKind
+    = e:enclosed_precedence_expr es:app_precedence_expr_kind_tail*
+    {
+        let mut f = AppPrecedenceExprKind::EnclosedPrecedence(e.kind);
+        for a in es {
+            f = AppPrecedenceExprKind::FuncApp(Box::new(FuncApp {
+                func: Expr {
+                    kind: f,
+                    term: None,
+                    ctx: None,
+                },
+                arg: a,
+            }));
+        }
+        f
+    }
+
+app_precedence_expr_kind_tail -> Expr<EnclosedPrecedenceExprKind>
+    = ws+ es:enclosed_precedence_expr
+    {
+        es
+    }
+
+enclosed_precedence_expr_kind -> EnclosedPrecedenceExprKind
+    = enum_func_term_expr_kind
+    / enum_func_type_expr_kind
+    / parens_expr_kind
+    / struct_term_expr_kind
+    / struct_type_expr_kind
+    / enum_term_expr_kind
+    / enum_type_expr_kind
+    / variable
+    / type_literal_expr_kind
+    / level_literal_expr_kind
+    / int_literal_expr_kind
+
+upcast_operator_precedence_expr_kind -> BlockPrecedenceExprKind
+    = ek:operator_precedence_expr_kind
+    {
+        BlockPrecedenceExprKind::OperatorPrecedence(ek)
+    }
+
+upcast_app_precedence_expr_kind -> OperatorPrecedenceExprKind
+    = ek:app_precedence_expr_kind
+    {
+        OperatorPrecedenceExprKind::AppPrecedence(ek)
+    }
+
+upcast_enclosed_precedence_expr_kind -> AppPrecedenceExprKind
+    = ek:enclosed_precedence_expr_kind
+    {
+        AppPrecedenceExprKind::EnclosedPrecedence(ek)
+    }
+
+struct_term_expr_kind -> EnclosedPrecedenceExprKind
+    = st:struct_term
+    {
+        EnclosedPrecedenceExprKind::StructTerm(Box::new(st))
+    }
+
+struct_term -> StructTerm
+    = p0:#position "{" ws* sti:struct_term_inner ws* "}" p1:#position
+    {
+        let mut sti = sti;
+        sti.0.reverse();
+        StructTerm {
+            head_elems: sti.0,
+            tail: sti.1,
+            span: Span::new(p0, p1),
+        }
+    }
+
+struct_term_inner -> (Vec<CompositeTermElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = struct_term_inner_head
+    / struct_term_inner_no_head
+
+struct_term_inner_head -> (Vec<CompositeTermElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = cte:composite_term_elem hro:struct_term_inner_head_rest?
+    {
+        let mut hro = hro;
+        match hro {
+            Some(mut hr) => {
+                hr.0.push(cte);
+                hr
+            },
+            None => (vec![cte], None),
+        }
+    }
+
+struct_term_inner_head_rest -> (Vec<CompositeTermElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = ws* "," ws* sti:struct_term_inner
+    { sti }
+
+struct_term_inner_no_head -> (Vec<CompositeTermElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = stt:composite_tail
+    {
+        (vec![], stt)
+    }
+
+composite_term_elem -> CompositeTermElem
+    = p0:#position i:composite_term_elem_name? e:operator_precedence_expr p1:#position
+    {
+        CompositeTermElem {
+            ident: i,
+            expr: e,
+            span: Span::new(p0, p1),
+        }
+    }
+
+composite_term_elem_name -> Ident
+    = i:ident ws* "=" ws*
+    {
+        i
+    }
+
+struct_type_expr_kind -> EnclosedPrecedenceExprKind
+    = st:struct_type
+    {
+        EnclosedPrecedenceExprKind::StructType(Box::new(st))
+    }
+
+struct_type -> StructType
+    = p0:#position "#{" ws* cti:composite_type_inner ws* "}" p1:#position
+    {
+        let mut cti = cti;
+        cti.0.reverse();
+        StructType {
+            head_elems: cti.0,
+            tail: cti.1,
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_type_expr_kind -> EnclosedPrecedenceExprKind
+    = et:enum_type
+    {
+        EnclosedPrecedenceExprKind::EnumType(Box::new(et))
+    }
+
+enum_type -> EnumType
+    = p0:#position "#[" ws* cti:composite_type_inner ws* "]" p1:#position
+    {
+        let mut cti = cti;
+        cti.0.reverse();
+        EnumType {
+            head_elems: cti.0,
+            tail: cti.1,
+            span: Span::new(p0, p1),
+        }
+    }
+
+composite_type_inner -> (Vec<CompositeTypeElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = composite_type_inner_head
+    / composite_type_inner_no_head
+
+composite_type_inner_head -> (Vec<CompositeTypeElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = cte:composite_type_elem hro:composite_type_inner_head_rest?
+    {
+        let mut hro = hro;
+        match hro {
+            Some(mut hr) => {
+                hr.0.push(cte);
+                hr
+            },
+            None => (vec![cte], None),
+        }
+    }
+
+composite_type_inner_head_rest -> (Vec<CompositeTypeElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = ws* "," ws* sti:composite_type_inner
+    { sti }
+
+composite_type_inner_no_head -> (Vec<CompositeTypeElem>, Option<Expr<OperatorPrecedenceExprKind>>)
+    = stt:composite_tail
+    {
+        (vec![], stt)
+    }
+
+composite_tail -> Option<Expr<OperatorPrecedenceExprKind>>
+    = composite_tail_expr?
+
+composite_tail_expr -> Expr<OperatorPrecedenceExprKind>
+    = "..." ws* e:operator_precedence_expr
+    { e }
+
+enum_term_expr_kind -> EnclosedPrecedenceExprKind
+    = et:enum_term
+    {
+        EnclosedPrecedenceExprKind::EnumTerm(Box::new(et))
+    }
+
+enum_term -> EnumTerm
+    = p0:#position "[" ws* etk:enum_term_kind ws* "]" p1:#position
+    {
+        EnumTerm {
+            kind: etk,
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_term_kind -> EnumTermKind
+    = enum_term_kind_left
+    / enum_term_kind_right
+
+enum_term_kind_left -> EnumTermKind
+    = cte:composite_term_elem
+    {
+        EnumTermKind::Left(cte)
+    }
+
+enum_term_kind_right -> EnumTermKind
+    = "..." ws* e:operator_precedence_expr
+    {
+        EnumTermKind::Right(e)
+    }
+
+composite_type_elem -> CompositeTypeElem
+    = p0:#position i:composite_type_elem_name? e:operator_precedence_expr p1:#position
+    {
+        CompositeTypeElem {
+            ident: i,
+            expr: e,
+            span: Span::new(p0, p1),
+        }
+    }
+
+composite_type_elem_name -> Ident
+    = i:ident ws* ":" ws*
+    {
+        i
+    }
+
+let_expr_kind  -> BlockPrecedenceExprKind
+    = le:let_expr
+    {
+        BlockPrecedenceExprKind::LetExpr(Box::new(le))
+    }
+
+let_expr -> LetExpr
+    = p0:#position "let" ws+ p:pattern ws+ "=" ws+ eto:operator_precedence_expr ws* ";" ws* ein:block_precedence_expr p1:#position
+    {
+        LetExpr {
+            pattern: p,
+            let_to: eto,
+            let_in: ein,
+            span: Span::new(p0, p1),
+        }
+    }
+
+func_term -> FuncTerm
+    = singular_func_term_kind
+    / enum_func_term_kind
+
+singular_func_term_expr_kind -> OperatorPrecedenceExprKind
+    = sft:singular_func_term
+    {
+        OperatorPrecedenceExprKind::SingularFuncTerm(Box::new(sft))
+    }
+
+singular_func_term_kind -> FuncTerm
+    = sft:singular_func_term
+    {
+        FuncTerm::Singular(sft)
+    }
+
+singular_func_term -> SingularFuncTerm
+    = p:pattern ws+ "=>" ws+ e:operator_precedence_expr
+    {
+        SingularFuncTerm {
+            pattern: Box::new(p),
+            res: Box::new(e),
+        }
+    }
+
+enum_func_term_expr_kind -> EnclosedPrecedenceExprKind
+    = eft:enum_func_term
+    {
+        EnclosedPrecedenceExprKind::EnumFuncTerm(Box::new(eft))
+    }
+
+enum_func_term_kind -> FuncTerm
+    = eft:enum_func_term
+    {
+        FuncTerm::Enum(eft)
+    }
+
+enum_func_term -> EnumFuncTerm
+    = p0:#position "[" ws* efi:enum_func_term_inner ws* "]" p1:#position
+    {
+        let mut efi = efi;
+        efi.0.reverse();
+        EnumFuncTerm {
+            left_branches: efi.0,
+            right_branch: efi.1.map(Box::new),
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_func_term_inner -> (Vec<EnumFuncTermLeft>, Option<FuncTerm>)
+    = enum_func_term_inner_left
+    / enum_func_term_inner_no_left
+
+enum_func_term_inner_left -> (Vec<EnumFuncTermLeft>, Option<FuncTerm>)
+    = lb:enum_func_term_left_branch lro:enum_func_term_inner_left_rest?
+    {
+        let mut lro = lro;
+        match lro {
+            Some(mut lr) => {
+                lr.0.push(lb);
+                lr
+            },
+            None => (vec![lb], None),
+        }
+    }
+
+enum_func_term_left_branch -> EnumFuncTermLeft
+    = p0:#position i:enum_func_term_left_branch_name? f:func_term p1:#position
+    {
+        EnumFuncTermLeft {
+            left_name: i,
+            func: f,
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_func_term_left_branch_name -> Ident
+    = i:ident ws* "=" ws*
+    {
+        i
+    }
+
+enum_func_term_inner_left_rest -> (Vec<EnumFuncTermLeft>, Option<FuncTerm>)
+    = ws* "," ws* efi:enum_func_term_inner
+    { efi }
+
+enum_func_term_inner_no_left -> (Vec<EnumFuncTermLeft>, Option<FuncTerm>)
+    = t:enum_func_term_tail
+    {
+        (vec![], t)
+    }
+
+enum_func_term_tail -> Option<FuncTerm>
+    = enum_func_term_tail_func?
+
+enum_func_term_tail_func -> FuncTerm
+    = "..." ws* ft:func_term
+    { ft }
+
+func_type -> FuncType
+    = singular_func_type_kind
+    / enum_func_type_kind
+
+singular_func_type_expr_kind -> OperatorPrecedenceExprKind
+    = sft:singular_func_type
+    {
+        OperatorPrecedenceExprKind::SingularFuncType(Box::new(sft))
+    }
+
+singular_func_type_kind -> FuncType
+    = sft:singular_func_type
+    {
+        FuncType::Singular(sft)
+    }
+
+singular_func_type -> SingularFuncType
+    = p:pattern ws* "->" ws* e:operator_precedence_expr
+    {
+        SingularFuncType {
+            pattern: Box::new(p),
+            res_type: Box::new(e),
+        }
+    }
+
+enum_func_type_expr_kind -> EnclosedPrecedenceExprKind
+    = eft:enum_func_type
+    {
+        EnclosedPrecedenceExprKind::EnumFuncType(Box::new(eft))
+    }
+
+enum_func_type_kind -> FuncType
+    = eft:enum_func_type
+    {
+        FuncType::Enum(eft)
+    }
+
+enum_func_type -> EnumFuncType
+    = p0:#position "[" ws* efi:enum_func_type_inner ws* "]" p1:#position
+    {
+        let mut efi = efi;
+        efi.0.reverse();
+        EnumFuncType {
+            left_branches: efi.0,
+            right_branch: efi.1.map(Box::new),
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_func_type_inner -> (Vec<EnumFuncTypeLeft>, Option<FuncType>)
+    = enum_func_type_inner_left
+    / enum_func_type_inner_no_left
+
+enum_func_type_inner_left -> (Vec<EnumFuncTypeLeft>, Option<FuncType>)
+    = lb:enum_func_type_left_branch lro:enum_func_type_inner_left_rest?
+    {
+        let mut lro = lro;
+        match lro {
+            Some(mut lr) => {
+                lr.0.push(lb);
+                lr
+            },
+            None => (vec![lb], None),
+        }
+    }
+
+enum_func_type_left_branch -> EnumFuncTypeLeft
+    = p0:#position i:enum_func_type_left_branch_name? f:func_type p1:#position
+    {
+        EnumFuncTypeLeft {
+            left_name: i,
+            func: f,
+            span: Span::new(p0, p1),
+        }
+    }
+
+enum_func_type_left_branch_name -> Ident
+    = i:ident ws* "=" ws*
+    {
+        i
+    }
+
+enum_func_type_inner_left_rest -> (Vec<EnumFuncTypeLeft>, Option<FuncType>)
+    = ws* "," ws* efi:enum_func_type_inner
+    { efi }
+
+enum_func_type_inner_no_left -> (Vec<EnumFuncTypeLeft>, Option<FuncType>)
+    = t:enum_func_type_tail
+    {
+        (vec![], t)
+    }
+
+enum_func_type_tail -> Option<FuncType>
+    = enum_func_type_tail_func?
+
+enum_func_type_tail_func -> FuncType
+    = "..." ws* ft:func_type
+    { ft }
+
+
+type_literal_expr_kind -> EnclosedPrecedenceExprKind
+    = l:type_literal
+    {
+        EnclosedPrecedenceExprKind::TypeLiteral(l)
+    }
+
+type_literal -> TypeLiteral
+    = p0:#position "Type" r:rank p1:#position
+    {
+        TypeLiteral {
+            rank: r,
+            span: Span::new(p0, p1),
+        }
+    }
+
+level_literal_expr_kind -> EnclosedPrecedenceExprKind
+    = l:level_literal
+    {
+        EnclosedPrecedenceExprKind::LevelLiteral(l)
+    }
+
+level_literal -> LevelLiteral
+    = p0:#position "Level" r:rank p1:#position
+    {
+        LevelLiteral {
+            rank: r,
+            span: Span::new(p0, p1),
+        }
+    }
+
+rank -> usize
+    = r:rank_succ?
+    {
+        r.unwrap_or(0)
+    }
+
+rank_succ -> usize
+    = "'" r:rank
+    {
+        1 + r
+    }
+
+int_literal_expr_kind -> EnclosedPrecedenceExprKind
+    = il:int_literal
+    {
+        EnclosedPrecedenceExprKind::IntLiteral(il)
+    }
+
+int_literal -> IntLiteral
+    = p0:#position d:digits it:int_type_lowercase p1:#position
+    {
+        IntLiteral {
+            bits: d,
+            int_type: it,
+            span: Span::new(p0, p1),
+        }
+    }
+
+digits -> BigUint
+    = s:$([0-9]+)
+    {
+        BigUint::from_str(s).unwrap()
+    }
+
+int_type_lowercase -> IntType
+    = "um" { IntType::Ubig }
+
+rec_type_expr_kind -> OperatorPrecedenceExprKind
+    = rt:rec_type
+    {
+        OperatorPrecedenceExprKind::RecType(Box::new(rt))
+    }
+
+rec_type -> RecType
+    = p0:#position "Rec" ws+ i:ident ws+ e:app_precedence_expr p1:#position
+    {
+        RecType {
+            name: i,
+            rec_type: e,
+            span: Span::new(p0, p1),
+        }
+    }
+
+pattern -> Pattern
+    = pk:pattern_kind
+    {
+        Pattern {
+            kind: pk,
+        }
+    }
+
+pattern_kind -> PatternKind
+    = bind_pattern_kind
+    / parens_pattern_kind
+    / struct_pattern_kind
+    / equality_pattern_kind
+
+bind_pattern_kind -> PatternKind
+    = i:ident
+    {
+        PatternKind::Bind(i)
+    }
+
+parens_pattern_kind -> PatternKind
+    = p:parens_pattern
+    {
+        PatternKind::Parens(Box::new(p))
+    }
+
+parens_pattern -> ParensPattern
+    = p0:#position "(" ws* p:pattern ws* ")" p1:#position
+    {
+        ParensPattern {
+            sub_pattern: p,
+            span: Span::new(p0, p1),
+        }
+    }
+
+typed_pattern_kind -> PatternKind
+    = tp:typed_pattern
+    {
+        PatternKind::Typed(Box::new(tp))
+    }
+
+typed_pattern -> TypedPattern
+    = p:pattern ws* ":" ws* t:operator_precedence_expr
+    {
+        TypedPattern {
+            sub_pattern: p,
+            pattern_type: t,
+        }
+    }
+
+struct_pattern_kind -> PatternKind
+    = sp:struct_pattern
+    {
+        PatternKind::Struct(Box::new(sp))
+    }
+
+struct_pattern -> StructPattern
+    = p0:#position "{" ws* sti:struct_pattern_inner ws* "}" p1:#position
+    {
+        let mut sti = sti;
+        sti.0.reverse();
+        StructPattern {
+            head_elems: sti.0,
+            tail: sti.1,
+            span: Span::new(p0, p1),
+        }
+    }
+
+struct_pattern_inner -> (Vec<CompositePatternElem>, Option<Pattern>)
+    = struct_pattern_inner_head
+    / struct_pattern_inner_no_head
+
+struct_pattern_inner_head -> (Vec<CompositePatternElem>, Option<Pattern>)
+    = cte:composite_pattern_elem hro:struct_pattern_inner_head_rest?
+    {
+        let mut hro = hro;
+        match hro {
+            Some(mut hr) => {
+                hr.0.push(cte);
+                hr
+            },
+            None => (vec![cte], None),
+        }
+    }
+
+struct_pattern_inner_head_rest -> (Vec<CompositePatternElem>, Option<Pattern>)
+    = ws* "," ws* sti:struct_pattern_inner
+    { sti }
+
+struct_pattern_inner_no_head -> (Vec<CompositePatternElem>, Option<Pattern>)
+    = stt:struct_pattern_tail
+    {
+        (vec![], stt)
+    }
+
+composite_pattern_elem -> CompositePatternElem
+    = p0:#position i:composite_pattern_elem_name? p:pattern p1:#position
+    {
+        CompositePatternElem {
+            name: i,
+            sub_pattern: p,
+            span: Span::new(p0, p1),
+        }
+    }
+
+composite_pattern_elem_name -> Ident
+    = i:ident ws* "=" ws*
+    {
+        i
+    }
+
+struct_pattern_tail -> Option<Pattern>
+    = struct_pattern_tail_pattern?
+
+struct_pattern_tail_pattern -> Pattern
+    = "..." ws* p:pattern
+    { p }
+
+equality_pattern_kind -> PatternKind
+    = ep:equality_pattern
+    {
+        PatternKind::Equality(Box::new(ep))
+    }
+
+equality_pattern -> EqualityPattern
+    = a:app_precedence_expr ws+ "==" ws+ b:app_precedence_expr
+    {
+        EqualityPattern {
+            a: a,
+            b: b,
+        }
+    }
+
+equality_term_expr_kind -> OperatorPrecedenceExprKind
+    = et:equality_term
+    {
+        OperatorPrecedenceExprKind::EqualityTerm(Box::new(et))
+    }
+
+equality_term -> EqualityTerm
+    = p0:#position a:app_precedence_expr ws+ "==" ws* b:app_precedence_expr p1:#position
+    {
+        EqualityTerm {
+            a: a,
+            b: b,
+            span: Span::new(p0, p1),
+        }
+    }
+
+equality_type_expr_kind -> OperatorPrecedenceExprKind
+    = et:equality_type
+    {
+        OperatorPrecedenceExprKind::EqualityType(Box::new(et))
+    }
+
+equality_type -> EqualityType
+    = p0:#position a:app_precedence_expr ws+ "#=" ws* b:app_precedence_expr p1:#position
+    {
+        EqualityType {
+            a: a,
+            b: b,
+            span: Span::new(p0, p1),
+        }
+    }
+
+parens_expr_kind -> EnclosedPrecedenceExprKind
+    = p:parens
+    {
+        EnclosedPrecedenceExprKind::Parens(Box::new(p))
+    }
+
+parens -> ParensExpr
+    = p0:#position "(" ws* e:block_precedence_expr ws* ")" p1:#position
+    {
+        ParensExpr {
+            sub_expr: e,
+            span: Span::new(p0, p1),
+        }
+    }
+
+typed_expr_kind -> OperatorPrecedenceExprKind
+    = te:typed_expr
+    {
+        OperatorPrecedenceExprKind::Typed(Box::new(te))
+    }
+
+typed_expr -> TypedExpr
+    = p0:#position e:app_precedence_expr ws* ":" ws+ t:operator_precedence_expr p1:#position
+    {
+        TypedExpr {
+            typed_term: e,
+            typed_type: t,
+            span: Span::new(p0, p1),
+        }
+    }
+
+variable -> EnclosedPrecedenceExprKind
+    = i:ident
+    {
+        EnclosedPrecedenceExprKind::Variable(i)
+    }
+
+ident -> Ident
+    = p0:#position s:$([a-zA-Z_] [a-zA-Z_0-9]*) p1:#position
+    {
+        let text = String::from(s);
+        let span = Span::new(p0, p1);
+        Ident {
+            text: Rc::new(text),
+            span: span,
+        }
+    }
+
+ws -> ()
+    = [ \t\r\n]
+    / "//" [^\n]* "\n"
+

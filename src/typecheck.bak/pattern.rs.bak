@@ -1,0 +1,681 @@
+use std::boxed::FnBox;
+
+use lexer::Span;
+use core::{Term, TermKind, World, is_subtype, bump_index, reduce_head};
+use parse::{Expr, Pattern, PatternKind, CompositePatternElem};
+use typecheck::{Ctx, TypeCheckError, TypeMismatch};
+use typecheck::{typecheck_expr};
+
+struct ExtraVar {
+    var_name: Ident,
+    var_type: Term,
+}
+
+pub struct CtxExt {
+    extra_vars: Vec<ExtraVar>,
+    transform: Box<Fn(Term) -> Term>
+    args: Vec<Term>,
+}
+
+impl CtxExt {
+    pub fn empty() -> CtxExt {
+        CtxExt {
+            extra_vars: vec![],
+            transform: box |t| t,
+            arg: vec![],
+        }
+    }
+
+    pub fn extend(&self, ctx: &Ctx, f: F) -> Result<Term, TypeCheckError>
+        where F: FnOnce(&Ctx) -> Result<Term, TypeCheckError>
+    {
+        fn push(ctx: &Ctx, extra_vars: &[ExtraVar], transform, arg, f: F) -> Result<Term, TypeCheckError> {
+            match extra_vars.split_first() {
+                None => {
+                    transform(f(ctx)?)
+                },
+                Some((ref first, rest)) => {
+                    let sub_ctx = Ctx::Cons {
+                        tail: ctx,
+                        var_name: &first.var_name,
+                        var_type: &first.var_type,
+                    };
+                    push(sub_ctx, rest, transform, f)
+                },
+            }
+        }
+
+        push(ctx, &self.extra_vars[..], &self.transform, &self.arg, f)
+    }
+
+    pub fn enter(&self, term: &Term) -> Term {
+        let mut term = term;
+        for arg in self.args.iter().rev() {
+            term = substitute(term, arg, 0);
+        }
+        term
+    }
+}
+
+pub fn typecheck_pattern(
+        pattern: &Pattern,
+        pattern_type: &Term,
+        ctx: &Ctx,
+        ctx_ext: &CtxExt,
+        world: &World,
+    ) -> Result<CtxExt, TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Bind(ref ident) => {
+            let ret = CtxExt {
+                extra_vars: vec![(ident, pattern_type)],
+                transform: box |t| {
+                    let t = bump_index(t, 1, 1);
+                    let t = Term::new(TermKind::FuncApp {
+                        func: Term::new(TermKind::FuncTerm(t)),
+                        args: Term::new(TermKind::Var(0)),
+                    });
+                    t
+                },
+                args: vec![Term::new(TermKind::Var(0))],
+            };
+            Ok(ret)
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_pattern_type = ctx_ext.extend(ctx, |sub_ctx| {
+                typecheck_expr(&typed_pattern.pattern_type, Omega, sub_ctx, world)
+            });
+            let checked_pattern_type = normalise(&checked_pattern_type, world);
+            if !checked_pattern_type.is_subtype(pattern_type) {
+                return Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: typed_pattern.sub_pattern.span,
+                    expected: pattern_type.clone(),
+                }));
+            }
+
+            typecheck_pattern(&typed_pattern.sub_pattern,
+                              pattern_type,
+                              ctx,
+                              ctx_ext,
+                              world)
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typecheck_struct_pattern(&struct_pattern.head_elens[..],
+                                     &struct_pattern.tail_elem,
+                                     ctx,
+                                     ctx_ext,
+                                     world)
+        },
+    }
+}
+
+pub fn typecheck_struct_pattern(
+        head_elems: &[CompositePatternElem],
+        tail_elem: &Option<Pattern>,
+        pattern_type: &Term,
+        ctx: &Ctx,
+        ctx_ext: &CtxExt,
+        world: &World
+    ) -> Result<CtxExt, TypeCheckError>
+{
+    match head_elems.split_first() {
+        None => {
+            match *tail_elem {
+                None => {
+                    if let TermKind::UnitType = **pattern_type {
+                        let ret = CtxExt {
+                            extra_vars: vec![],
+                            transform: box |depth, t| {
+                                let t = bump_index(t, 1, 0);
+                               t 
+                            },
+                            args: vec![Term::new(TermKind::UnitTerm)],
+                        };
+                        Ok(ret)
+                    } else {
+                        Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                            span: ...
+                            expected: pattern_type.clone(),
+                        }))
+                    }
+                }
+                Some(ref tail) => {
+                    typecheck_pattern(tail, pattern_type, ctx, ctx_ext, world)
+                },
+            }
+        },
+        Some((ref first, rest)) => {
+            if let TermKind::PairType { ref head_type, ref tail_type } = **pattern_type {
+                let head_ctx_ext = typecheck_pattern(&first.sub_pattern,
+                                                     head_type,
+                                                     ctx,
+                                                     ctx_ext,
+                                                     world)?;
+                let tail_ctx_ext = {
+                    let mut extra_vars = vec![];
+                    extra_vars.extend(ctx_ext.extra_vars.iter().cloned());
+                    extra_vars.extend(head_ctx_ext.extra_vars.iter().cloned());
+                    let mut args = vec![];
+                    args.extend(ctx_ext.args.iter().cloned());
+                    args.extend(head_ctx_ext.args.iter().cloned());
+                    let sub_ctx_ext = CtxExt {
+                        extra_vars: extra_vars,
+                        transform: box |t| {
+                            let t = head_ctx_ext.transform(t);
+                            let t = ctx_ext.transform(t);
+                            t
+                        };
+                        args: args,
+                    };
+                    typecheck_struct_pattern(rest,
+                                             tail_elems,
+                                             tail_type,
+                                             ctx,
+                                             head_ctx_ext,
+                                             world)?
+                };
+                let mut extra_vars = head_ctx_ext.extra_vars;
+                extra_vars.extend(tail_ctx_ext.extra_vars);
+                let transform = box |t| {
+                    let t = tail_ctx_ext.transform(t);
+                    let t = head_ctx_ext.transform(t);
+                    let t = bump_index(t, 1, 1);
+                    let t = Term::new(TermKind::PairElim {
+                        pair: Term::new(TermKind::Var(0)),
+                        res: t,
+                        head_type: head_type.clone(),
+                        tail_type: tail_type.clone(),
+                    });
+                    t
+                };
+                let args = vec![Term::new(TermKind::PairTerm {
+                    head: head_ctx_extra.arg,
+                    tail: bump_index(&head_ctx_extra.arg, 1, 0),
+                })];
+                Ok(CtxExt {
+                    extra_vars: extra_vars,
+                    transform: transform,
+                    arg: arg,
+                })
+            }
+        },
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+type Transform<'p> = Fn(Term) -> Term + 'p;
+type Continuation<'p> = FnBox(&Term, &Ctx, &Transform) -> Result<Term, TypeCheckError> + 'p;
+
+
+
+
+/// Typecheck a pattern.
+///
+/// # Args
+/// * pattern: the pattern to typecheck.
+/// * pattern_type: A term of depth n, the expected type of the pattern.
+/// * depth: The depth of the transform. How many extra variables the transform introduces.
+/// * ctx: The context under the transform. A term can be brought under the transform by bumping by depth.
+///        The context is an extension of the context of pattern_type.
+/// * transform: Transforms a term of depth (n + depth) to a term of depth n by
+///              stacking on eliminators, producing the correct context.
+/// # Returns
+pub fn typecheck_pattern(
+        pattern: &Pattern,
+        pattern_type: &Term /* n */,
+        depth: usize
+        ctx: &Ctx /* n + d */,
+        transform: Transform /* n + d => n */,
+        world: &World,
+    ) -> Result<(usize /* d */, Ctx /* n + d + 1 */, Transform /* n + d + 1 => n + 1 */), TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Bind(ref ident) => {
+            let bump_pattern_type = bump_index(pattern_type, depth, 0);
+            let sub_ctx = Ctx::Cons {
+                tail: ctx,
+                var_name: ident,
+                var_type: bump_pattern_type,
+            };
+            let sub_transform = |t| {
+                transform(Term::new(FuncApp {
+                    func: Term::new(FuncTerm {
+                        body: t,
+                    }),
+                    arg: Term::new(Var(depth)),
+                }))
+            };
+            Ok((depth, sub_ctx, sub_transform))
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            let (head_depth /* hd */,
+                 head_ctx /* n + hd + 1 */,
+                 head_transform /* n + hd + 1 => n + 1 */
+            ) = typecheck_pattern(struct_pattern.head,
+                                  pattern_type.head,
+                                  depth,
+                                  ctx,
+                                  transform,
+                                  world);
+            let (tail_depth /* td */
+            , tail_ctx, tail_transform) = typecheck_pattern(struct_pattern.tail,
+                                                                           tail_type /* n + 1 */,
+                                                                           head_depth, /* hd */
+                                                                           head_ctx /* n + hd + 1 */,
+                                                                           head_transform /* n + hd + 1 => n + 1 */,,
+                                                                           world);
+
+            
+
+
+        },
+    }
+}
+
+
+
+
+
+
+
+
+
+
+pub fn typecheck_pattern(
+        pattern: &Pattern,
+        real_pattern_type: &Term /* n + p */,
+        real_ctx: &Ctx /* n + p */,
+        apparent_pattern_type: &Term /* n + p + d */,
+        apparent_ctx: &Ctx /* n + p + d */,
+        world: &World,
+        real_continuation_type: &Term /* n + 1 */,
+        apparent_continuation_type: &Term /* n + p + d + 1 */,
+        transform: &Transform<'p> /* n + p + d => n + p */,
+        continuation: Box<Continuation> /* n + p + d + 1 => n + p + 1 */
+    ) -> Result<Term /* n + p + 1 */, TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {}
+        PatternKind::Bind(ref ident) => {
+            let sub_real_ctx = Ctx::Cons {
+                tail: real_ctx,
+                var_name: ident,
+                var_type: real_pattern_type,
+            };
+            let sub_apparent_ctx = Ctx::Cons {
+                tail: apparent_ctx,
+                var_name: ident,
+                var_type: apparent_pattern_type,
+            };
+            
+        }
+    }
+}
+
+pub fn typecheck_pattern(
+        pattern: &'p Pattern,
+        pattern_type: &Term /* depth n + p */,
+        pattern_ctx: &Ctx /* depth n + p + d */,
+        artificial_depth: usize, /* this is d */
+        world: &World,
+        continuation_type: &Term /* depth n + 1 */,
+        transform: &Transform<'p> /* depth n + p + d => n + p */,
+        continuation: Box<Continuation<'p>> /* depth n + m + 1 => n + 1 */,
+    ) -> Result<Term /* depth n + 1 */, TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typecheck_pattern(sub_pattern, patter_type, pattern_ctx, artificial_depth, world, transform, continuation)
+        },
+        PatternKind::Bind(ref ident) => {
+            let apparent_pattern_type = bump_index(pattern_type, artifical_depth, 0);
+            let sub_ctx = Ctx::Cons {   /* n + p + d + 1 */
+                tail: ctx,
+                var_type: &apparent_pattern_type,
+                var_name: ident,
+            };
+            continuation.call_box((
+
+            
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typecheck_pattern(...)
+        },
+    }
+}
+
+pub fn typecheck_struct_pattern(
+        head_elems: &[CompositePatternElem],
+        tail_elem: &Option<Pattern>,
+        pattern_type: &Term /* depth c */,
+        pattern_ctx: &Ctx /* depth c + d */,
+        world: &World,
+        continuation_type: &Term /* depth n + 1 */,
+        transform: &Transform<'p> /* depth c + d => c */,
+        continuation: Box<FnBox(&Ctx /* depth m */, &Transform /* depth m => n + 1 */) -> Termi /* depth n + 1 */ + 'p>) -> Result<Term, TypeCheckError>
+{
+    match head_elems.split_first() {
+        Some((ref first, rest)) => {
+            match pattern_type.kind {
+                TermKind::PairType { ref head_type, ref tail_type } => {
+                    typecheck_pattern(first, head_type, pattern_ctx, world, transform, Box::new(|sub_ctx, sub_transform| {
+                        typecheck_struct_pattern(rest, tail_elem, tail_type, sub_ctx, world, continuation_type, sub_transform, Box::new(|sub_sub_ctx, sub_sub_transform| {
+                            
+                            continuation(sub_sub_ctx, sub_sub_transform)
+                        }))
+                    }))
+                },
+            }
+        },
+    }
+}
+
+
+
+/// Transforms a Term from being relative to one context to another.
+type Transformer = Box<FnMut(Term) -> Term>;
+
+struct PatternCtx<'p> {
+    /// The actual context produced by the pattern. As seen by the desugared AST.
+    actual_ctx: Ctx<'p>,
+
+    /// The apparent context used for typechecking whatever follows this pattern.
+    apparent_ctx: Ctx<'p>,
+
+    /// Transforms terms from apparent_ctx to real_ctx
+    transform: Transform,
+}
+
+/// Example. A struct pattern {x: U32, y: U32} produces an actual context with
+/// a pair in scope, an apparent context with x and y in scope, and a transform
+/// that puts terms under a PairElim.
+pub fn typecheck_pattern<'p>(
+        pattern: &'p Pattern,
+        pattern_type: &Term,
+        pattern_ctx: PatternCtx<'p>
+        world: &World) -> Result<PatternCtx<'p>, TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typecheck_pattern(sub_pattern, pattern_type, pattern_ctx, world)
+        }
+        PatternKind::Bind(ref ident) => {
+            let sub_actual_ctx = Ctx::Cons {
+                tail: actual_ctx,
+                var_type: pattern_type,
+                var_name: &ident.text,
+            };
+            let sub_apparent_ctx = Ctx::Cons {
+                tail: apparent_ctx,
+                var_type: pattern_type,
+                var_name: &ident.text,
+            };
+            let transform = Box::new(|t| t);
+
+            Ok((sub_ctx, transform))
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_type = typecheck_expr(&typed_pattern.pattern_type, &Term::new(TermKind::Omega), pattern_ctx, world)?;
+            if !is_subtype(&checked_type, pattern_type) {
+                return Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: typed_pattern.pattern_type.span,
+                    expected: pattern_type.clone(),
+                }));
+            }
+        },
+    }
+}
+
+pub fn typecheck_pattern<'p>(
+        pattern: &'p Pattern,
+        pattern_type: &Term,
+        pattern_ctx: &Ctx,
+        cont_type: &Term,
+        cont_ctx: &Ctx,
+        world: &World,
+        continuation: Box<FnBox(&Term, &Ctx) -> Result<Term, TypeCheckError> + 'p>) -> Result<Term, TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typecheck_pattern(sub_pattern, pattern_type, pattern_ctx, cont_type, cont_ctx, world, continuation)
+        },
+        PatternKind::Bind(ref ident) => {
+            let sub_cont_ctx = Ctx::Cons {
+                tail: cont_ctx,
+                var_type: pattern_type,
+                var_name: &ident.text,
+            };
+            continuation.call_box((cont_type, &sub_cont_ctx))
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_type = typecheck_expr(&typed_pattern.pattern_type, &Term::new(TermKind::Omega), pattern_ctx, world)?;
+            if !is_subtype(&checked_type, pattern_type) {
+                return Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: typed_pattern.pattern_type.span,
+                    expected: pattern_type.clone(),
+                }));
+            }
+            typecheck_pattern(&typed_pattern.sub_pattern, pattern_type, pattern_ctx, cont_type, cont_ctx, world, continuation)
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typecheck_struct_pattern(&struct_pattern.head_elems[..],
+                                     &struct_pattern.tail,
+                                     pattern_type,
+                                     pattern_ctx,
+                                     pattern.span,
+                                     cont_type,
+                                     cont_ctx,
+                                     world,
+                                     continuation)
+        },
+    }
+}
+
+/*
+pub fn typeget_pattern>'p>(
+        pattern: &'p Pattern,
+        pattern_ctx: &Ctx,
+        cont_type: &Term,
+        cont_ctx: &Ctx,
+        world: &World,
+        continuation: Box<FnBox(&Term, &Ctx) -> Result<Term, TypeCheckError>) -> Result<(Term, Term), TypeCheckError>
+{
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typeget_pattern(sub_pattern, pattern_ctx, cont_type, cont_ctx, world, continuation)
+        },
+        PatternKind::Bind(ref ident) => {
+            Err(TypeCheckError::UnknownType {
+                span: pattern.span,
+            })
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_type = typecheck_expr(&typed_pattern.pattern_type, &Term::new(TermKind::Omega), pattern_ctx, world)?;
+            let cont_term = typecheck_pattern(&typed_pattern.sub_pattern,
+                                              &checked_type,
+                                              pattern_ctx,
+                                              cont_type,
+                                              cont_ctx,
+                                              world,
+                                              continuation)?;
+            Ok((cont_term, checked_type))
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typeget_struct_pattern(&struct_pattern.head_elems[..],
+                                   &struct_pattern.tail,
+                                   pattern_ctx,
+                                   pattern.span,
+                                   cont_type,
+                                   cont_ctx,
+                                   world,
+                                   continuation)
+        },
+    }
+}
+*/
+
+pub fn typecheck_struct_pattern<'p>(
+        head_elems: &'p [CompositePatternElem],
+        tail: &'p Option<Pattern>,
+        pattern_type: &Term,
+        pattern_ctx: &Ctx,
+        span: Span,
+        cont_type: &Term,
+        cont_ctx: &Ctx,
+        world: &World,
+        continuation: Box<FnBox(&Term, &Ctx) -> Result<Term, TypeCheckError> + 'p>) -> Result<Term, TypeCheckError>
+{
+    match head_elems.split_first() {
+        None => {
+            match *tail {
+                None => {
+                    match **pattern_type {
+                        TermKind::UnitType => {
+                            let sub_cont_ctx = Ctx::Cons {
+                                tail: cont_ctx,
+                                var_name: "",
+                                var_type: pattern_type,
+                            };
+                            continuation.call_box((cont_type, &sub_cont_ctx))
+                        },
+                        _ => Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                            span: span,
+                            expected: pattern_type.clone(),
+                        })),
+                    }
+                },
+                Some(ref tail) => {
+                    typecheck_pattern(tail, pattern_type, pattern_ctx, cont_type, cont_ctx, world, continuation)
+                },
+            }
+        },
+        Some((first, rest)) => {
+            match **pattern_type {
+                TermKind::PairType { ref head_type, ref tail_type } => {
+                    let sub_cont_ctx = Ctx::Cons {
+                        tail: cont_ctx,
+                        var_name: "",
+                        var_type: pattern_type,
+                    };
+                    typecheck_pattern(&first.sub_pattern,
+                                      head_type,
+                                      pattern_ctx,
+                                      cont_type,
+                                      &sub_cont_ctx,
+                                      world,
+                                      Box::new(|sub_cont_type: &Term, sub_sub_cont_ctx: &Ctx| {
+                        let sub_pattern_ctx = Ctx::Cons {
+                            tail: pattern_ctx,
+                            var_name: &first.name.as_ref().map_or("", |i| &i.text),
+                            var_type: head_type,
+                        };
+                        let sub_span = Span {
+                            start: match rest.first() {
+                                Some(ref elem) => elem.span.start,
+                                None => match *tail {
+                                    Some(ref tail_elem) => tail_elem.span.start,
+                                    None => span.end,
+                                },
+                            },
+                            end: span.end,
+                        };
+                        let sub_sub_cont_type = bump_index(sub_cont_type, 2, 0);
+                        let res = typecheck_struct_pattern(rest,
+                                                           tail,
+                                                           tail_type,
+                                                           &sub_pattern_ctx,
+                                                           sub_span,
+                                                           &sub_sub_cont_type,
+                                                           sub_sub_cont_ctx,
+                                                           world,
+                                                           continuation)?;
+                        let elim = Term::new(TermKind::PairElim {
+                            pair: Term::new(TermKind::Var(0)),
+                            res: res,
+                            head_type: head_type.clone(),
+                            tail_type: tail_type.clone(),
+                        });
+                        Ok(reduce_head(&elim, world))
+                    }))
+                },
+                _ => Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: span,
+                    expected: pattern_type.clone(),
+                })),
+            }
+        },
+    }
+}
+
+/*
+pub fn typeget_struct_pattern<'p>(
+        head_elems: &'p [CompositePatternElem],
+        tail: &Option<Pattern>,
+        pattern_ctx: &Ctx,
+        span: Span,
+        cont_type: &Term,
+        cont_ctx: &Ctx,
+        world: &World,
+        continuation: Box<FnBox(&Term, &Ctx) -> Result<Term, TypeCheckError> + 'p>) -> Result<(Term, Term), TypeCheckError>
+{
+    match head_elems.split_first() {
+        None => {
+            match *tail {
+                None => {
+                    let pattern_type = Term::new(TermKind::UnitType);
+                    let sub_cont_ctx = Ctx::Cons {
+                        tail: cont_ctx,
+                        var_name: "".
+                        var_type: &pattern_type,
+                    };
+                    let term = continuation.call_box((cont_type, &sub_cont_ctx));
+                    Ok((term, pattern_type))
+                },
+                Some(ref tail) => {
+                    typeget_pattern(tail, pattern_ctx, cont_type, cont_ctx, world, continuation)
+                },
+            }
+        },
+        Some((first, rest)) => {
+            typeget_pattern(&first.sub_pattern,
+                            pattern_ctx,
+                            cont_type,
+                            cont_ctx,
+
+        },
+    }
+}
+*/
+

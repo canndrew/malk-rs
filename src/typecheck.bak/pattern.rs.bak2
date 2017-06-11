@@ -1,0 +1,314 @@
+use lexer::{Span, TextPos};
+use core::{Term, TermKind, World, is_subtype, bump_index, reduce_head};
+use parse::{Expr, Pattern, PatternKind, CompositePatternElem};
+use typecheck::{Ctx, CtxNode, VarDef, TypeCheckError, TypeMismatch};
+use typecheck::{typecheck_expr};
+
+pub fn typecheck_pattern<'c, 'p: 'c>(
+        pattern: &'p Pattern,
+        pattern_type: &Term,
+        ctx: Ctx<'c, 'p>,
+        world: &World,
+    ) -> Result<CtxNode<'c, 'p>, TypeCheckError>
+{
+    println!("typecheck_pattern({})", pattern);
+    println!("pattern_type == {:#?}", pattern_type);
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typecheck_pattern(sub_pattern, pattern_type, ctx, world)
+        },
+        PatternKind::Bind(ref ident) => {
+            let pattern_type_cloned = pattern_type.clone();
+            let ctx_node = CtxNode {
+                tail: ctx,
+                vars: vec![VarDef { var_name: ident, var_type: pattern_type.clone() }],
+                arg: Term::new(TermKind::Var(0)),
+                transform: box move |d, t, res_type| {
+                    let bumped_res_type = bump_index(&res_type, 1, d + 1);
+                    let t = bump_index(&t, 1, d + 1);
+                    Term::new(TermKind::FuncApp {
+                        func: Term::new(TermKind::FuncTerm {
+                            body: t,
+                        }),
+                        arg: Term::new(TermKind::Var(d)),
+                        arg_type: pattern_type_cloned.clone(),
+                        res_type: bumped_res_type.clone(),
+                    })
+                },
+            };
+            Ok(ctx_node)
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_type = typecheck_expr(&typed_pattern.pattern_type, &Term::new(TermKind::Omega), ctx, world)?;
+            if !is_subtype(&checked_type, pattern_type) {
+                return Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: pattern.span,
+                    expected: pattern_type.clone(),
+                }));
+            }
+            typecheck_pattern(&typed_pattern.sub_pattern,
+                              pattern_type,
+                              ctx,
+                              world)
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typecheck_struct_pattern(&struct_pattern.head_elems[..],
+                                     &struct_pattern.tail,
+                                     pattern_type,
+                                     ctx,
+                                     pattern.span.end,
+                                     world)
+        },
+    }
+}
+
+pub fn typecheck_struct_pattern<'c, 'p: 'c>(
+        head_elems: &'p [CompositePatternElem],
+        tail_elem: &'p Option<Pattern>,
+        pattern_type: &Term,
+        ctx: Ctx<'c, 'p>,
+        span_end: TextPos,
+        world: &World
+    ) -> Result<CtxNode<'c, 'p>, TypeCheckError>
+{
+    print!("typecheck_struct_pattern(");
+    for elem in head_elems {
+        print!("{},", elem);
+    }
+    if let Some(ref elem) = *tail_elem {
+        print!("; {}", elem);
+    }
+    println!(")");
+    match head_elems.split_first() {
+        None => {
+            match *tail_elem {
+                None => {
+                    if let TermKind::UnitType = **pattern_type {
+                        let ctx_node = CtxNode {
+                            tail: ctx,
+                            vars: vec![],
+                            arg: Term::new(TermKind::UnitTerm),
+                            transform: box |d, t, _| {
+                                bump_index(&t, 1, d)
+                            },
+                        };
+                        Ok(ctx_node)
+                    } else {
+                        let span = Span {
+                            start: span_end,
+                            end: span_end,
+                        };
+                        Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                            span: span,
+                            expected: pattern_type.clone(),
+                        }))
+                    }
+                }
+                Some(ref tail) => {
+                    typecheck_pattern(tail, pattern_type, ctx, world)
+                },
+            }
+        },
+        Some((ref first, rest)) => {
+            if let TermKind::PairType { ref head_type, ref tail_type } = **pattern_type {
+                let head_node = typecheck_pattern(&first.sub_pattern,
+                                                  head_type,
+                                                  ctx,
+                                                  world)?;
+                let skewed_tail_type = head_node.skew(&tail_type, world);
+                println!("tail_type == {:#?}", tail_type);
+                println!("skewed_tail_type == {:#?}", skewed_tail_type);
+                let (tail_node_transform, tail_node_vars, tail_node_arg) = {
+                    let sub_ctx = Ctx::Cons(&head_node);
+                    let tail_node = typecheck_struct_pattern(rest,
+                                                             tail_elem,
+                                                             &skewed_tail_type,
+                                                             sub_ctx,
+                                                             span_end,
+                                                             world)?;
+                    (tail_node.transform, tail_node.vars, tail_node.arg)
+                };
+                
+                let transform = {
+                    let head_node_transform = head_node.transform;
+                    let head_node_vars_len = head_node.vars.len();
+                    let head_type_cloned = head_type.clone();
+                    let tail_type_cloned = tail_type.clone();
+                    box move |d, t, res_type: Term| {
+                        //let tail_res_type = bump_index(&res_type, 1, head_node_vars_len + );
+                        let t = tail_node_transform(head_node_vars_len, t, res_type.clone());
+                        let t = head_node_transform(1, t, res_type);
+                        let t = bump_index(&t, 1, d + 2);
+                        let head_type_bumped = bump_index(&head_type_cloned, 1, d);
+                        let tail_type_bumped = bump_index(&tail_type_cloned, 1, d + 1);
+                        Term::new(TermKind::PairElim {
+                            pair: Term::new(TermKind::Var(d)),
+                            res: t,
+                            head_type: head_type_bumped,
+                            tail_type: tail_type_bumped,
+                        })
+                    }
+                };
+                let vars = {
+                    let mut vars = Vec::with_capacity(head_node.vars.len() + tail_node_vars.len());
+                    vars.extend(head_node.vars);
+                    vars.extend(tail_node_vars);
+                    vars
+                };
+                let arg = Term::new(TermKind::PairTerm {
+                    head: bump_index(&head_node.arg, 1, 0),
+                    tail: tail_node_arg,
+                });
+                let ctx_node = CtxNode {
+                    tail: ctx,
+                    vars: vars,
+                    arg: arg,
+                    transform: transform,
+                };
+                Ok(ctx_node)
+            } else {
+                let span = Span {
+                    start: first.span.start,
+                    end: span_end,
+                };
+                Err(TypeCheckError::TypeMismatch(TypeMismatch {
+                    span: span,
+                    expected: pattern_type.clone(),
+                }))
+            }
+        },
+    }
+}
+
+pub fn typeget_pattern<'c, 'p: 'c>(
+        pattern: &'p Pattern,
+        ctx: Ctx<'c, 'p>,
+        world: &World,
+    ) -> Result<(CtxNode<'c, 'p>, Term), TypeCheckError>
+{
+    println!("typeget_pattern({})", pattern);
+    match pattern.kind {
+        PatternKind::Parens(ref sub_pattern) => {
+            typeget_pattern(sub_pattern, ctx, world)
+        },
+        PatternKind::Bind(ref ident) => {
+            Err(TypeCheckError::UnknownType {
+                span: pattern.span,
+            })
+        },
+        PatternKind::Typed(ref typed_pattern) => {
+            let checked_type = typecheck_expr(&typed_pattern.pattern_type, &Term::new(TermKind::Omega), ctx, world)?;
+            let ctx_node = typecheck_pattern(&typed_pattern.sub_pattern,
+                                             &checked_type,
+                                             ctx,
+                                             world)?;
+            Ok((ctx_node, checked_type))
+        },
+        PatternKind::Struct(ref struct_pattern) => {
+            typeget_struct_pattern(&struct_pattern.head_elems[..],
+                                   &struct_pattern.tail,
+                                   ctx,
+                                   pattern.span.end,
+                                   world)
+        },
+    }
+}
+
+pub fn typeget_struct_pattern<'c, 'p: 'c>(
+        head_elems: &'p [CompositePatternElem],
+        tail_elem: &'p Option<Pattern>,
+        ctx: Ctx<'c, 'p>,
+        span_end: TextPos,
+        world: &World
+    ) -> Result<(CtxNode<'c, 'p>, Term), TypeCheckError>
+{
+    print!("typeget_struct_pattern(");
+    for elem in head_elems {
+        print!("{},", elem);
+    }
+    if let Some(ref elem) = *tail_elem {
+        print!("; {}", elem);
+    }
+    println!(")");
+    match head_elems.split_first() {
+        None => {
+            match *tail_elem {
+                None => {
+                    let ctx_node = CtxNode {
+                        tail: ctx,
+                        vars: vec![],
+                        arg: Term::new(TermKind::UnitTerm),
+                        transform: box |d, t, _| {
+                            bump_index(&t, 1, d)
+                        },
+                    };
+                    Ok((ctx_node, Term::new(TermKind::UnitType)))
+                }
+                Some(ref tail) => {
+                    typeget_pattern(tail, ctx, world)
+                },
+            }
+        },
+        Some((ref first, rest)) => {
+            let (head_node, head_type) = typeget_pattern(&first.sub_pattern, ctx, world)?;
+            let (tail_node_transform, tail_node_vars, tail_node_arg, skewed_tail_type) = {
+                let sub_ctx = Ctx::Cons(&head_node);
+                let (tail_node, skewed_tail_type) = typeget_struct_pattern(rest,
+                                                                           tail_elem,
+                                                                           sub_ctx,
+                                                                           span_end,
+                                                                           world)?;
+                (tail_node.transform, tail_node.vars, tail_node.arg, skewed_tail_type)
+            };
+            let tail_type = head_node.deskew(skewed_tail_type, Term::new(TermKind::Omega), world);
+            let transform = {
+                let head_node_transform = head_node.transform;
+                let head_node_vars_len = head_node.vars.len();
+                let head_type_cloned = head_type.clone();
+                let tail_type_cloned = tail_type.clone();
+                box move |d, t, res_type: Term| {
+                    //let bumped_res_type = bump_index(&res_type, d, 0);
+                    //println!("skewing pair; t == {:#?}", t);
+                    let t = tail_node_transform(head_node_vars_len, t, res_type.clone());
+                    //println!("skewing pair; with tail == {:#?}", t);
+                    let t = head_node_transform(1, t, res_type);
+                    //println!("skewing pair; with head == {:#?}", t);
+                    let t = bump_index(&t, 1, d + 2);
+                    //println!("skewing pair; bumped == {:#?}", t);
+                    println!("deskewing pair. attaching head == {:#?}", head_type_cloned);
+                    println!("deskewing pair. attaching tail == {:#?}", tail_type_cloned);
+                    let head_type_bumped = bump_index(&head_type_cloned, 1, d);
+                    let tail_type_bumped = bump_index(&tail_type_cloned, 1, d + 1);
+                    Term::new(TermKind::PairElim {
+                        pair: Term::new(TermKind::Var(d)),
+                        res: t,
+                        head_type: head_type_bumped,
+                        tail_type: tail_type_bumped,
+                    })
+                }
+            };
+            let vars = {
+                let mut vars = Vec::with_capacity(head_node.vars.len() + tail_node_vars.len());
+                vars.extend(head_node.vars);
+                vars.extend(tail_node_vars);
+                vars
+            };
+            let arg = Term::new(TermKind::PairTerm {
+                head: bump_index(&head_node.arg, 1, 0),
+                tail: tail_node_arg,
+            });
+            let ctx_node = CtxNode {
+                tail: ctx,
+                vars: vars,
+                arg: arg,
+                transform: transform,
+            };
+            let pattern_type = Term::new(TermKind::PairType {
+                head_type: head_type,
+                tail_type: tail_type,
+            });
+            Ok((ctx_node, pattern_type))
+        },
+    }
+}
+

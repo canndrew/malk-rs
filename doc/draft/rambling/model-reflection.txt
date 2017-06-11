@@ -1,0 +1,132 @@
+# Model reflection
+
+In a simple, dependently typed lambda calculus, all functions terminate.
+The concept of "termination" doesn't actually exist within it, all functions just yield a value for an input.
+But there are *models* of dependently typed lambda calculus where there are functions that don't terminate.
+    that is, every function corresponds to some more general notion of algoritm within the model
+    but there are algorithms that don't correspond to any function (eg. the non-terminating ones)
+if there only there was some way to talk about, within TT, the fact that there is always some "thing" or some "model" which is "running" your proof/code
+    and then refer to more general things that may only exist inside these models
+    for example:
+        we can talk about the type `Int -> Int eff NonTerminate`
+        where `eff NonTerminate` says that this isn't just a function from Int to Int
+        it's a member of a more general class of possibly non-terminating "functions" which exist in some models
+        is there a way to pinpoint the concept of "non-terminating function"? Not in some particular model, but in general?
+        Can we make it so users can refer to that concept in a language?
+
+what "is" the non-termination effect? What does it mean to support it?
+in a "functions are sequences of instructions" model it can be an extra instruction which
+    converts subterm functions to full-term functions (~n -> R) -> (Nat -> R)
+
+when we compile something through a series of intermediate representations we are interpretting it into a series of models.
+
+am i just reinventing monads here? Monads are certainly and example of what I'm talking about - in that every monad can be interpreted as some model - but they're not the entire concept.
+    monads have to be able to be reflected back into the abstract language
+    but eg. non-termination can't do that
+        you can write a handler for Maybe functions that handles the Nothing case
+        but you can't write a handler for non-terminating functions which handles the non-termination case.
+
+In the Maybe monad model
+    types T become #[T .. #{}]
+    function application (f: A -> B) (a: A) -> B
+        becomes (f: #[A -> B .. #{}]) (a: #[A .. #{}])  -> #[B .. #{}]
+    the number 3 becomes [3]
+    
+    i'd like to be able to be coding inside this monad and have my code look like normal code
+        then insert a [.. {}] somewhere just to break shit
+    so, my model gets to define some wierd value which doesn't exist outside of the model
+    and we can use it in our code because the model knows how to handle it
+
+
+todo:
+    learn some of the basic concepts and lingo of model theory
+    see if i can construct a couple of novel models of MLTT which contain wierd extra features
+
+examples of things i'd like this to support
+    pull in an exotic object from an extension
+        like none
+    write non-terminating functions without it complaining
+    invent reference types, "sizes" of values etc.
+    use special instructions when on a specific cpu
+
+a model author must:
+    give a translation for terms
+DON'T give a function for performing substitutions on terms.
+instead provide a relation, IsSubstitutionOf : Term -> Term -> Term -> Type
+where IsSubstitutionOf (f) (x) (f[x/x/]) is always inhabited.
+    this allows for non-termination, non-determinism, all the good stuff.
+
+
+@Model = #{
+    @Term : Type -> Type
+    @Reduction : (@Ty: Type) -> Term Ty -> Term Ty -> Type
+}
+
+@Pure = {
+    @Term = @Ty => Ty,
+    @Reduction = @Ty => {x, y} => X #= y,
+};
+
+@Reflect = {
+    Term : (Ty: Type) -> Type
+         = #[
+        unit_term: Ty #= #{},
+        unit_type: Ty #= Type,
+        lambda: #{
+            Arg: Type,
+            Res: (arg: Arg) -> Type,
+            body: (arg: Arg) -> Term (Res arg),
+        },
+        pair: #{
+            Head: Type,
+            head,
+            Tail: Head -> Type,
+            tail: Tail head,
+            Ty #= #{Head, ... Tail},
+        }
+        either: #{
+            Left: Type,
+            Right: Type,
+            left: Left,
+            Ty #= #[Left, ... Right],
+        }
+        .
+        .
+        .
+    ]
+
+    Reduction : (Ty: Type) -> Term Ty -> Term Ty -> Type
+              = (Ty: Type) => unquote a #= unquote b
+}
+
+Extension = {M0: Model, M1: Model} -> Type
+                                    => #{
+    promote: (Ty: Type) -> M0.Term Ty -> M1.Term Ty,
+    congurence:  (Ty: Type) -> {
+        t0: M0.Term Ty,
+        t1: M0.Term ty,
+        M0.Reduction t0 t1,
+    } -> M1.Reduction (promote t0) (promote t1)
+}
+
+
+Maybe: Model = {
+    Term = (Ty: Type) => #[none: #{}, ... Ty],
+    Reduction = (Ty: Type) => #[
+        =none   => [
+            =none   => #{},
+            ... _   => #[],
+        ],
+        ... val0 => [
+            =none   => #[],
+            ...val1 => val0 #= val1
+        ]
+    ],
+};
+
+wub : Extension {Reflect, Maybe} = {
+    promote = _ => x => [... unquote x],
+    congruence = {_, _, r} => r,
+}
+
+
